@@ -81,6 +81,10 @@ type Conn struct {
 }
 
 func (conn *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	return conn.prepareContext(ctx, query)
+}
+
+func (conn *Conn) prepareContext(ctx context.Context, query string) (*Stmt, error) {
 	var (
 		stmt driver.Stmt
 		err  error
@@ -93,7 +97,7 @@ func (conn *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt
 	}
 
 	if err != nil {
-		return stmt, err
+		return nil, err
 	}
 
 	return &Stmt{stmt, conn.hooks, query}, nil
@@ -139,21 +143,39 @@ func (conn *ExecerContext) execContext(ctx context.Context, query string, args [
 }
 
 func (conn *ExecerContext) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	return execWithHooks(ctx, query, args, conn.hooks, func(ctx context.Context) (driver.Result, error) {
+		results, err := conn.execContext(ctx, query, args)
+		if err == nil || !errors.Is(err, driver.ErrSkip) {
+			return results, err
+		}
+		// If driver.ErrSkip is returned, we fall back to using Prepare + Statement to handle the query.
+		// We need to avoid executing the hooks twice since they were already run in ExecContext.
+		// This matches the behavior in database/sql when ExecContext returns ErrSkip.
+		stmt, err := conn.prepareContext(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		defer stmt.Close()
+		return stmt.execContext(ctx, args)
+	})
+}
+
+func execWithHooks(ctx context.Context, query string, args []driver.NamedValue, hooks Hooks, execer func(context.Context) (driver.Result, error)) (driver.Result, error) {
 	var err error
 
 	list := namedToInterface(args)
 
 	// Exec `Before` Hooks
-	if ctx, err = conn.hooks.Before(ctx, query, list...); err != nil {
+	if ctx, err = hooks.Before(ctx, query, list...); err != nil {
 		return nil, err
 	}
 
-	results, err := conn.execContext(ctx, query, args)
+	results, err := execer(ctx)
 	if err != nil {
-		return results, handlerErr(ctx, conn.hooks, err, query, list...)
+		return results, handlerErr(ctx, hooks, err, query, list...)
 	}
 
-	if _, err := conn.hooks.After(ctx, query, list...); err != nil {
+	if _, err := hooks.After(ctx, query, list...); err != nil {
 		return nil, err
 	}
 
@@ -201,21 +223,43 @@ func (conn *QueryerContext) queryContext(ctx context.Context, query string, args
 }
 
 func (conn *QueryerContext) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	return queryWithHooks(ctx, query, args, conn.hooks, func(ctx context.Context) (driver.Rows, error) {
+		rows, err := conn.queryContext(ctx, query, args)
+		if err == nil || !errors.Is(err, driver.ErrSkip) {
+			return rows, err
+		}
+		// If driver.ErrSkip is returned, we fall back to using Prepare + Statement to handle the query.
+		// We need to avoid executing the hooks twice since they were already run in QueryContext.
+		// This matches the behavior in database/sql when QueryContext returns ErrSkip.
+		stmt, err := conn.prepareContext(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		rows, err = stmt.queryContext(ctx, args)
+		if err != nil {
+			_ = stmt.Close()
+			return nil, err
+		}
+		return &rowsWrapper{rows: rows, closeStmt: stmt}, nil
+	})
+}
+
+func queryWithHooks(ctx context.Context, query string, args []driver.NamedValue, hooks Hooks, queryer func(context.Context) (driver.Rows, error)) (driver.Rows, error) {
 	var err error
 
 	list := namedToInterface(args)
 
 	// Query `Before` Hooks
-	if ctx, err = conn.hooks.Before(ctx, query, list...); err != nil {
+	if ctx, err = hooks.Before(ctx, query, list...); err != nil {
 		return nil, err
 	}
 
-	results, err := conn.queryContext(ctx, query, args)
+	results, err := queryer(ctx)
 	if err != nil {
-		return results, handlerErr(ctx, conn.hooks, err, query, list...)
+		return results, handlerErr(ctx, hooks, err, query, list...)
 	}
 
-	if _, err := conn.hooks.After(ctx, query, list...); err != nil {
+	if _, err := hooks.After(ctx, query, list...); err != nil {
 		return nil, err
 	}
 
@@ -264,25 +308,9 @@ func (stmt *Stmt) execContext(ctx context.Context, args []driver.NamedValue) (dr
 }
 
 func (stmt *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	var err error
-
-	list := namedToInterface(args)
-
-	// Exec `Before` Hooks
-	if ctx, err = stmt.hooks.Before(ctx, stmt.query, list...); err != nil {
-		return nil, err
-	}
-
-	results, err := stmt.execContext(ctx, args)
-	if err != nil {
-		return results, handlerErr(ctx, stmt.hooks, err, stmt.query, list...)
-	}
-
-	if _, err := stmt.hooks.After(ctx, stmt.query, list...); err != nil {
-		return nil, err
-	}
-
-	return results, err
+	return execWithHooks(ctx, stmt.query, args, stmt.hooks, func(ctx context.Context) (driver.Result, error) {
+		return stmt.execContext(ctx, args)
+	})
 }
 
 func (stmt *Stmt) queryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
@@ -298,25 +326,9 @@ func (stmt *Stmt) queryContext(ctx context.Context, args []driver.NamedValue) (d
 }
 
 func (stmt *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	var err error
-
-	list := namedToInterface(args)
-
-	// Exec Before Hooks
-	if ctx, err = stmt.hooks.Before(ctx, stmt.query, list...); err != nil {
-		return nil, err
-	}
-
-	rows, err := stmt.queryContext(ctx, args)
-	if err != nil {
-		return rows, handlerErr(ctx, stmt.hooks, err, stmt.query, list...)
-	}
-
-	if _, err := stmt.hooks.After(ctx, stmt.query, list...); err != nil {
-		return nil, err
-	}
-
-	return rows, err
+	return queryWithHooks(ctx, stmt.query, args, stmt.hooks, func(ctx context.Context) (driver.Rows, error) {
+		return stmt.queryContext(ctx, args)
+	})
 }
 
 func (stmt *Stmt) Close() error                                    { return stmt.Stmt.Close() }
@@ -348,6 +360,27 @@ func namedValueToValue(named []driver.NamedValue) ([]driver.Value, error) {
 		dargs[n] = param.Value
 	}
 	return dargs, nil
+}
+
+type rowsWrapper struct {
+	rows      driver.Rows
+	closeStmt driver.Stmt // if non-nil, statement to Close on close
+}
+
+func (r *rowsWrapper) Close() error {
+	err := r.rows.Close()
+	if r.closeStmt != nil {
+		_ = r.closeStmt.Close()
+	}
+	return err
+}
+
+func (r *rowsWrapper) Columns() []string {
+	return r.rows.Columns()
+}
+
+func (r *rowsWrapper) Next(dest []driver.Value) error {
+	return r.rows.Next(dest)
 }
 
 /*

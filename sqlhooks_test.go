@@ -68,62 +68,62 @@ func newSuite(t *testing.T, driver driver.Driver, dsn string) *suite {
 }
 
 func (s *suite) TestHooksExecution(t *testing.T, query string, args ...interface{}) {
-	var before, after bool
+	var beforeCount, afterCount int
 
 	s.hooks.before = func(ctx context.Context, q string, a ...interface{}) (context.Context, error) {
-		before = true
+		beforeCount++
 		return ctx, nil
 	}
 	s.hooks.after = func(ctx context.Context, q string, a ...interface{}) (context.Context, error) {
-		after = true
+		afterCount++
 		return ctx, nil
 	}
 
 	t.Run("Query", func(t *testing.T) {
-		before, after = false, false
+		beforeCount, afterCount = 0, 0
 		_, err := s.db.Query(query, args...)
 		require.NoError(t, err)
-		assert.True(t, before, "Before Hook did not run for query: "+query)
-		assert.True(t, after, "After Hook did not run for query:  "+query)
+		assert.Equal(t, 1, beforeCount, "Before Hook didn't execute only once: "+query)
+		assert.Equal(t, 1, afterCount, "After Hook didn't execute only once: "+query)
 	})
 
 	t.Run("QueryContext", func(t *testing.T) {
-		before, after = false, false
+		beforeCount, afterCount = 0, 0
 		_, err := s.db.QueryContext(context.Background(), query, args...)
 		require.NoError(t, err)
-		assert.True(t, before, "Before Hook did not run for query: "+query)
-		assert.True(t, after, "After Hook did not run for query:  "+query)
+		assert.Equal(t, 1, beforeCount, "Before Hook didn't execute only once: "+query)
+		assert.Equal(t, 1, afterCount, "After Hook didn't execute only once: "+query)
 	})
 
 	t.Run("Exec", func(t *testing.T) {
-		before, after = false, false
+		beforeCount, afterCount = 0, 0
 		_, err := s.db.Exec(query, args...)
 		require.NoError(t, err)
-		assert.True(t, before, "Before Hook did not run for query: "+query)
-		assert.True(t, after, "After Hook did not run for query:  "+query)
+		assert.Equal(t, 1, beforeCount, "Before Hook didn't execute only once: "+query)
+		assert.Equal(t, 1, afterCount, "After Hook didn't execute only once: "+query)
 	})
 
 	t.Run("ExecContext", func(t *testing.T) {
-		before, after = false, false
+		beforeCount, afterCount = 0, 0
 		_, err := s.db.ExecContext(context.Background(), query, args...)
 		require.NoError(t, err)
-		assert.True(t, before, "Before Hook did not run for query: "+query)
-		assert.True(t, after, "After Hook did not run for query:  "+query)
+		assert.Equal(t, 1, beforeCount, "Before Hook didn't execute only once: "+query)
+		assert.Equal(t, 1, afterCount, "After Hook didn't execute only once: "+query)
 	})
 
 	t.Run("Statements", func(t *testing.T) {
-		before, after = false, false
+		beforeCount, afterCount = 0, 0
 		stmt, err := s.db.Prepare(query)
 		require.NoError(t, err)
 
 		// Hooks just run when the stmt is executed (Query or Exec)
-		assert.False(t, before, "Before Hook run before execution: "+query)
-		assert.False(t, after, "After Hook run before execution:  "+query)
+		assert.Equal(t, 0, beforeCount, "Before Hook run before execution: "+query)
+		assert.Equal(t, 0, afterCount, "After Hook run before execution:  "+query)
 
 		_, err = stmt.Query(args...)
 		require.NoError(t, err)
-		assert.True(t, before, "Before Hook did not run for query: "+query)
-		assert.True(t, after, "After Hook did not run for query:  "+query)
+		assert.Equal(t, 1, beforeCount, "Before Hook didn't execute only once: "+query)
+		assert.Equal(t, 1, afterCount, "After Hook didn't execute only once: "+query)
 	})
 }
 
